@@ -69,11 +69,11 @@ class MyBuilder
   def create_stuff(number, cost)
     debug 24, "+\nCalling create_stuff(#{number}, #{cost})"
     part = find_or_create_part(number)
-    invoice_item = find_or_create(Payroll::InvoiceItem, description: "item: #{number}")
+    invoice_item = find_or_create(Payroll::InvoiceItem, description: item_name(number))
     ii_part_map = find_or_create(Payroll::InvoiceItemPart, invoice_item_id: invoice_item.id, part_id: part.id)
     service_code = find_or_create(Dispatching::ServiceCode,
-                                  description: "Service Code: #{number}",
-                                  short_name: "sc: #{number}")
+                                  description: service_code_description(number),
+                                  short_name: sc_short_name(number))
     ii_sc_map = find_or_create(Payroll::InvoiceItemServiceCode,
                                service_code_id: service_code.id,
                                invoice_item_id: invoice_item.id)
@@ -182,6 +182,30 @@ class MyBuilder
   def collect_created_items(data)
     @created_items << data
     nil
+  end
+
+  def item_name(number)
+    if debugging
+      "item: #{number}"
+    else
+      number
+    end
+  end
+
+  def service_code_description(number)
+    if debugging
+      "Service Code: #{number}"
+    else
+      number
+    end
+  end
+
+  def sc_short_name(number)
+    if debugging
+      "sc: #{number}"
+    else
+      number
+    end
   end
 
   def debugging
