@@ -1,45 +1,3 @@
-#
-# MyLoader
-#  Loads service code name and cost data from a .CSV
-#  - The object is Enumerable and can be treated like a R/O array of service code attribute hashes.
-#    Whatever columns are in the .CSV will be in the attributes.
-#
-class MyLoader
-  include Enumerable
-
-  attr_reader :data, :provider
-
-  def initialize(file: 'sc-audit/asurion-service-codes.csv')
-    @data = get_max_pricedata_from_file(file)
-    self
-  end
-
-  def [](index)
-    @data[index]
-  end
-
-  def each
-    i = 0
-    while i < @data.length
-      yield @data[i]
-      i += 1
-    end
-  end
-
-  private
-
-  def get_max_pricedata_from_file(file_name)
-    raw_data = CSV.read(file_name, headers: true).map(&:to_h)
-    curated_data = {}
-    raw_data.each do |item|
-      code = item['number']
-      curated_data[code] ||= item
-      curated_data[code] = item if curated_data[code]['cost'] < item['cost']
-    end
-    curated_data.sort.map(&:last)
-  end
-end
-
 # MyBuilder
 #   Builds the set of objects needed to on-board a service call.
 #   Currently, only tested with Asurion Service Codes.
@@ -242,28 +200,3 @@ class MyBuilder
     show(indent, text)
   end
 end
-
-def set_it_all_up
-  provider = 'Asurion'
-  file = 'sc-audit/asurion-service-codes.csv'
-
-  @items = MyLoader.new(file: file)
-  puts "loader instantiated as @items and #{@items.count} items loaded from '#{file}'"
-
-  @builder = MyBuilder.new(provider: provider);nil
-  puts 'builder instantiated as @builder'
-end
-
-def do_it_all
-  @items.each do |item|
-    @builder.create_stuff(item['number'], item['cost'])
-  end
-
-  @builder.set_amounts
-end
-
-def undo_it_all
-  @builder.undo
-end
-
-puts "defined methods: set_it_all_up, do_it_all, undo_it_all"
