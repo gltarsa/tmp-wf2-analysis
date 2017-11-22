@@ -1,14 +1,9 @@
 #
-# Creates an Inventory::Part for that number with the same name
-# Creates a Payroll::InvoiceItem for that part (same name)
-# Creates a Payroll::InvoiceItemPart for that II/Part pair
-# Creates Dispatching::ServiceCode for that number with a descriptions same as the name
-# Creates a Payroll::InvoiceItemServiceCode for that II/SC pair
-# Grabs the most recent Payroll::PayGrade for Asurion that it can find
-#    Updates all $0.00 costs that invoice item/paygrade (Payroll::InvoiceItemPayGrade)
-# Creates an InvoiceItemPayGrade for that Invoice Item/_cost_o
+# MyLoader
+#  Loads service code name and cost data from a .CSV
+#  - The object is Enumerable and can be treated like a R/O array of service code attribute hashes.
+#    Whatever columns are in the .CSV will be in the attributes.
 #
-
 class MyLoader
   include Enumerable
 
@@ -16,7 +11,6 @@ class MyLoader
 
   def initialize(file: 'sc-audit/asurion-service-codes.csv')
     @data = get_max_pricedata_from_file(file)
-    @current = @data.first
     self
   end
 
@@ -30,10 +24,6 @@ class MyLoader
       yield @data[i]
       i += 1
     end
-  end
-
-  def part_exists?(number)
-    Inventory::Part.find_by(number: number).present?
   end
 
   private
@@ -50,6 +40,37 @@ class MyLoader
   end
 end
 
+# MyBuilder
+#   Builds the set of objects needed to on-board a service call.
+#   Currently, only tested with Asurion Service Codes.
+#
+#   #create_stuff
+#    - Creates an Inventory::Part for that number with the same name
+#    - Creates a Payroll::InvoiceItem for that part (same name)
+#    - Creates a Payroll::InvoiceItemPart for that II/Part pair
+#    - Creates Dispatching::ServiceCode for that number with a descriptions same as the name
+#    - Creates a Payroll::InvoiceItemServiceCode for that II/SC pair
+#    - Collects all created invoice items and cost data for a mass  -pricing step (done by set_amounts)
+#    - Saves all objects created in an undo buffer that is processed by #undo to "rollback" the changes.
+#
+#   #latest_pg_version
+#    - returns the latest pay grade version (i.e., collection of invoice_item costs for a give date)
+#      Note: this is not a lazy-evaluation, so if a new pay grade versions is
+#      created, this will be that new version
+#
+#   #amounts
+#    - returns the appropriately formatted hash for the Payroll::PayGradeVersion.new_amounts method
+#
+#   #set_amounts
+#    - creates a new PayGradeVersion and updates it with price data for all the
+#      service code invoice items created by this class.
+#    - Saves the new pg_version the undo buffer in the event of a desired rollback
+#
+#   #undo
+#    - deletes all of the items saved in the undo buffer, in the reverse order
+#      of creation (to minimize the prospect of foreign key violations)
+#
+#
 class MyBuilder
   attr_reader :undo_buffer, :data, :latest_pg_version  # visible for testing, need not be public
 
@@ -81,6 +102,21 @@ class MyBuilder
     nil
   end
 
+  def amounts
+    retval = {}
+    @created_items.each do |data|
+      retval.merge!(data[:item].id => data[:cost])
+    end
+    retval
+  end
+
+  def set_amounts
+    new_pg_version = latest_pg_version.new_version(latest_pg_version.effective + 1.day, amounts)
+
+    save_for_undo(new_pg_version)
+    nil
+  end
+
   def undo
     debug 24, "-\nCalling undo()"
     @undo_buffer.each do |item|
@@ -96,22 +132,6 @@ class MyBuilder
       end
     end
     nil
-  end
-
-  def set_amounts
-    amounts = build_amounts
-    new_pg_version = latest_pg_version.new_version(latest_pg_version.effective + 1.day, amounts)
-
-    save_for_undo(new_pg_version)
-    nil
-  end
-
-  def build_amounts
-    amounts = {}
-    @created_items.each do |data|
-      amounts.merge!(data[:item].id => data[:cost])
-    end
-    amounts
   end
 
   private
@@ -227,11 +247,10 @@ def set_it_all_up
   provider = 'Asurion'
   file = 'sc-audit/asurion-service-codes.csv'
 
-  loader = MyLoader.new(file: file)
-  puts 'loader instantiated'
-  @items = loader.data
-  puts "#{@items.count} items loaded into @items from '#{file}'"
-  @builder = MyBuilder.new(provider: provider)
+  @items = MyLoader.new(file: file)
+  puts "loader instantiated as @items and #{@items.count} items loaded from '#{file}'"
+
+  @builder = MyBuilder.new(provider: provider);nil
   puts 'builder instantiated as @builder'
 end
 
@@ -246,3 +265,5 @@ end
 def undo_it_all
   @builder.undo
 end
+
+puts "defined methods: set_it_all_up, do_it_all, undo_it_all"
