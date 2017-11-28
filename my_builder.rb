@@ -28,6 +28,9 @@
 #    - deletes all of the items saved in the undo buffer, in the reverse order
 #      of creation (to minimize the prospect of foreign key violations)
 #
+#   #toggle_debugging
+#    - toggles the debug logging in the object.  There are statements to
+#      display more details of various creation and deletion operations. This enables them.
 #
 class MyBuilder
   attr_reader :undo_buffer, :data, :latest_pg_version  # visible for testing, need not be public
@@ -38,6 +41,7 @@ class MyBuilder
     @pay_grade = Payroll::PayGrade.where(pay_grade_type: @pg_type)
     @created_items = []
     @undo_buffer = []
+    @debugging = false
     self
   end
 
@@ -92,7 +96,13 @@ class MyBuilder
     nil
   end
 
+  def toggle_debugging
+    @debugging = !@debugging
+  end
+
   private
+
+  attr_reader :debugging
 
   def valid_service_provider(name)
     provider = Dispatching::ServiceProvider.find_by(name: name)
@@ -186,17 +196,13 @@ class MyBuilder
     end
   end
 
-  def debugging
-    @debugging = !@debugging
-  end
-
   def show(indent, text)
     prefix = text[0] * (indent - 1)
     puts "#{prefix}#{text}"
   end
 
   def debug(indent, text)
-    return unless @debugging
+    return unless debugging
     show(indent, text)
   end
 end
