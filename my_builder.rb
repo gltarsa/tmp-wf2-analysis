@@ -11,7 +11,7 @@
 #    - Collects all created invoice items and cost data for a mass  -pricing step (done by set_amounts)
 #    - Saves all objects created in an undo buffer that is processed by #undo to "rollback" the changes.
 #
-#   #latest_pg_version
+#   #latest_pay_grade_version
 #    - returns the latest pay grade version (i.e., collection of invoice_item costs for a give date)
 #      Note: this is not a lazy-evaluation, so if a new pay grade versions is
 #      created, this will be that new version
@@ -33,24 +33,28 @@
 #      display more details of various creation and deletion operations. This enables them.
 #
 class MyBuilder
-  attr_reader :undo_buffer, :data, :latest_pg_version  # visible for testing, need not be public
+  attr_reader :undo_buffer
 
-  def initialize(provider: 'Asurion')
+  def initialize(provider: 'Asurion', type: 'Payroll')
     @provider = valid_service_provider(provider)
-    @pg_type = Payroll::PayGradeType.where(service_provider: @provider, name: 'Equipment')
-    @pay_grade = Payroll::PayGrade.where(pay_grade_type: @pg_type)
+    @service_code_type_name = type.downcase.to_sym
     @created_items = []
     @undo_buffer = []
     @debugging = false
     self
   end
 
-  def latest_pg_version
-    @pay_grade.first.pay_grade_versions.first
+  def latest_pay_grade_version
+    raise '? @pay_grade_type_name needs to be set' if @pay_grade_type_name.nil?
+    pay_grade_type = Payroll::PayGradeType.where(service_provider: @provider, name: @pay_grade_type_name)
+    pay_grade = Payroll::PayGrade.where(pay_grade_type: pay_grade_type)
+    pay_grade.first.pay_grade_versions.first
   end
 
-  def create_stuff(number, cost)
+  def create_stuff(number, base_type, cost)
     debug 24, "+\nCalling create_stuff(#{number}, #{cost})"
+    set_type_name_defaults(base_type)
+
     part = find_or_create_part(number)
     invoice_item = find_or_create(Payroll::InvoiceItem, description: item_name(number))
     ii_part_map = find_or_create(Payroll::InvoiceItemPart, invoice_item_id: invoice_item.id, part_id: part.id)
@@ -73,19 +77,25 @@ class MyBuilder
   end
 
   def set_amounts
-    new_pg_version = latest_pg_version.new_version(latest_pg_version.effective + 1.day, amounts)
+    new_pg_version = latest_pay_grade_version.new_version(latest_pay_grade_version.effective + 1.day, amounts)
 
     save_for_undo(new_pg_version)
     nil
   end
 
+  def undo_buffer_entries
+    @undo_buffer.count
+  end
+
   def undo
     debug 24, "-\nCalling undo()"
+    operation_count = 0
     @undo_buffer.each do |item|
       debug 10, "- Destroying #{item.inspect}"
       if item.persisted?
         begin
           item.destroy!
+          operation_count += 1
         rescue StandardError => e
           show 4, "? failed: #{e}"
         end
@@ -93,7 +103,7 @@ class MyBuilder
         show 10, "% Not present in DB: #{item}, id: #{item.try(:id)}\n\n"
       end
     end
-    nil
+    operation_count
   end
 
   def toggle_debugging
@@ -135,23 +145,29 @@ class MyBuilder
     thing
   end
 
+  def set_type_name_defaults(base_type)
+    @part_type_name = base_type.downcase.to_sym
+    @invoice_item_type_name = base_type
+    @pay_grade_type_name = base_type
+  end
+
   def default_attributes(model)
     {
       Inventory::Part => {
-        part_category: Inventory::PartCategory.find_by(name: 'Asurion'),
+        part_category: Inventory::PartCategory.find_by(name: @provider.name),
         serialized: false,
         active: true,
-        part_type: Inventory::PartType.find_by(name: :equipment),
+        part_type: Inventory::PartType.find_by(name: @part_type_name),
         ir_price_available: false,
         returnable: true
       },
       Payroll::InvoiceItem => {
-        invoice_item_type: Payroll::InvoiceItemType.find_by(name: 'Equipment')
+        invoice_item_type: Payroll::InvoiceItemType.find_by(name: @invoice_item_type_name)
       },
       Payroll::InvoiceItemPart => {
       },
       Dispatching::ServiceCode => {
-        service_code_type: Dispatching::ServiceCodeType.find_by(name: :payroll),
+        service_code_type: Dispatching::ServiceCodeType.find_by(name: @service_code_type_name),
         rank: 0,
         active: true,
         smart_home: false,

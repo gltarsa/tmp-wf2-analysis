@@ -1,6 +1,9 @@
 #
 # MyLoader
-#  Loads service code name and cost data from a .CSV
+#  Loads service code name and attributes, including cost data, from a .CSV
+#  file.  It expects to see multiple records differing only by cost and will
+#  load only the record that has the highest cost data.
+#
 #  - The object is Enumerable and can be treated like a R/O array of service code attribute hashes.
 #    Whatever columns are in the .CSV will be in the attributes.
 #
