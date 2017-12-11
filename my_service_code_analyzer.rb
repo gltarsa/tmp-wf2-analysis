@@ -20,136 +20,69 @@ load 'sc-audit/my_reporter.rb'
 
 include ActionView::Helpers::NumberHelper
 
-# count is the number of service codes to analyze from Dispatching::ServiceCodes
-# start is the ordinal position of the first code to analyze
 class MyServiceCodeAnalyzer
-  attr_reader :current_name
-
-  def initialize(output: "./sc_analysis.csv", start: 1)
-    clear_memos
-
+  def initialize(output: './sc_analysis.csv', start_id: nil)
     @debugging = false
+
     @csv_headers = []
     @csv_data = []
     @csv_file_name = output
 
-    raise "? Service Code Types in DB out of sync. " +
-      "#{existing_types} != #{valid_types}" unless valid_types_consistent?
-
-    @service_codes = Dispatching::ServiceCode.find_each
-    begin
-      start.times { @service_codes.next } if start > 0
-    rescue StopIteration => e
-      $stderr.puts "? starting record is beyond the end of the collection"
-      return nil
-    end
-
-    self
-  end
-
-  def current_name
-    service_code.short_name
+    @analysis_collection = set_start(start_id, all_service_codes)
   end
 
   def analyze_next
-    clear_memos
-
     report = MyReporter.new
 
-    report.add(:short_name, service_code.short_name)
-    report.add(:description, service_code.description)
-    report.add(:abbreviated, abbreviated?)
+    check_for_naming(report)
+    check_for_on_boarding(report)
+    check_for_valid_providers(report)
+    check_for_possible_pay_grade_types(report)
+    check_for_type_name(report)
 
-    report.add(:properly_on_boarded, on_boarded?)
+    return report if type_checks_fail?(report)
+    return report if invoice_item_mapping_checks_fail?(report)
 
-    # SC has one or more valid providers
-    if providers.present?
-      report.warning("Has #{providers.count} providers (#{providers_list})") if providers.count > 1
-      report.add_all(:providers, providers) do |spm|
-        "#{spm.service_provider.id}: #{spm.service_provider.name}"
-      end
-    else
-      report.error("No service provider mapping")
-    end
-
-    # There are one or more pay_grade types for that provider
-    #
-
-    # SC: show possible pay_grade types
-    if possible_pay_grades.present?
-      report.add_all(:possible_pay_grades, possible_pay_grades)
-    else
-      if providers.present?
-        report.error("Valid provider, but no pay grades")
-      else
-        report.error("No pay grades found")
-      end
-    end
-
-    # SC has a valid type
-    # An error here stops further checking
-    unless type.present?
-      report.error("(invalid--missing)")
-      return report
-    end
-
-    unless type_valid?
-      report.error("Invalid Type: #{type.name}")
-      return report
-    end
-
-    report.add(:type, type.name) if type.present?
-
-    # SC must be mapped to at least one invoice item
-    # an error here stops further checking
-    unless mapped_invoice_items.present?
-      report.add(:mapped_invoice_items, "")
-      report.error("not mapped to any invoice items")
-      return report
-    end
-
-    # report all mapped items
-    report.add_all(:mapped_invoice_items, mapped_invoice_items) do |i|
-      "#{i.invoice_item.id}: #{i.invoice_item.description} [#{i.invoice_item.invoice_item_type.name}]"
-    end
-
-    # At least one should have the same name as the short code
-    report.error("No mapped invoice item named #{service_code.short_name}") unless at_least_one_invoice_item_with_matching_name?
-
-    report_extra_invoice_item_parts_with_non_matching_names(report)
-    report_extra_invoice_items(report)
+    check_for_invoice_item_mappings(report)
     report
   end
 
   def analyze_all
-    loop do |sc|
+    number_analyzed = 0
+    @analysis_collection.each do |item|
+      update_scode_cache(item)
+
       report = analyze_next
       @csv_data << report.csv_line
       @csv_headers = report.merged_csv_headers(@csv_headers)
+      number_analyzed += 1
     end
 
     dump_csv
-    nil
+    number_analyzed
   end
 
   #++
   # short-cuts for various required components
   #
-  def service_code
-    # @service_code ||= Dispatching::ServiceCode.find_each.next
-    @service_code ||= @service_codes.next
+  def update_scode_cache(item)
+    @current_service_code = item
+  end
+
+  def current_scode
+    @current_service_code ||= @analysis_collection.peek
   end
 
   def type
-    service_code.service_code_type
+    current_scode.service_code_type
   end
 
   def providers
-    service_code.service_provider_service_code_maps
+    current_scode.service_provider_service_code_maps
   end
 
   def providers_list
-    providers.map {|spm| "#{spm.service_provider.id}: #{spm.service_provider.name}"}.join(',')
+    providers.map { |spm| "#{spm.service_provider.id}: #{spm.service_provider.name}" }.join(',')
   end
 
   def valid_types
@@ -160,34 +93,24 @@ class MyServiceCodeAnalyzer
     valid_types.include?(type.name)
   end
 
-  def existing_types
-    @existing_types ||= Dispatching::ServiceCodeType.order(:name).map { |t| t.name }
-  end
-
-  def valid_types_consistent?
-    valid_types == existing_types
-  end
-
   def invoice_item_map
-    service_code.invoice_item_service_codes
+    current_scode.invoice_item_service_codes
   end
 
   alias mapped_invoice_items invoice_item_map
 
-  def mapped_invoice_items
-    service_code.invoice_item_service_codes
-  end
-
   def possible_pay_grades
-    providers.map do |p|
+    collection = providers.map do |p|
       Payroll::PayGrade.joins(:pay_grade_type).where("payroll_pay_grade_types.service_provider_id = #{p.id}")
-    end.flatten.map do |pg|
+    end
+
+    collection.flatten.map do |pg|
       "pg #{pg.id}: #{pg.name} (type: #{pg.pay_grade_type.name}/prov_id: #{pg.pay_grade_type.service_provider_id})"
     end
   end
 
   def latest_pay_grade_version
-    pg_type = Payroll::PayGradeType.where(service_provider: @provider, name: 'Equipment')
+    pg_type = Payroll::PayGradeType.where(service_provider: provider, name: 'Equipment')
     pay_grade = Payroll::PayGrade.where(pay_grade_type: pg_type)
     pay_grade.first.pay_grade_versions.first
   end
@@ -195,7 +118,7 @@ class MyServiceCodeAnalyzer
   ##--
 
   def abbreviated?
-    service_code.description != service_code.short_name
+    current_scode.description != current_scode.short_name
   end
 
   def self_consistent?
@@ -203,40 +126,38 @@ class MyServiceCodeAnalyzer
   end
 
   def on_boarded?
-    valid_so_far =
-      check("invoice_item_map.present?") &&
-      check("mapped_invoice_items.count > 0") &&
-      check("at_least_one_invoice_item_with_matching_name?") &&
-      check("at_least_one_invoice_item_having_part_with_matching_name?") &&
-      check("providers.present?") &&
-      check("has_a_current_price?")
+    check('invoice_item_map.present?') &&
+      check('mapped_invoice_items.count > 0') &&
+      check('at_least_one_invoice_item_with_matching_name?') &&
+      check('at_least_one_invoice_item_having_part_with_matching_name?') &&
+      check('providers.present?') &&
+      check('a_current_price?')
   end
 
   def at_least_one_invoice_item_with_matching_name?
     # this is the actual code of the method
     invoice_item_map.any? do |ii2sc_map|
-      ii2sc_map.invoice_item.description == current_name
+      ii2sc_map.invoice_item.description == current_scode.short_name
     end
   end
 
   def at_least_one_invoice_item_having_part_with_matching_name?
-    invoice_item_map.any? do |map|
-      ii = map.invoice_item
-      ii.invoice_item_parts.any? do |map|
-        check("'#{map.part.number}' == '#{ii.description}'")
+    invoice_item_map.any? do |ii_map|
+      ii = ii_map.invoice_item
+      ii.invoice_item_parts.any? do |iip_map|
+        check("'#{iip_map.part.number}' == '#{ii.description}'")
       end
     end
   end
 
-  def has_a_current_price?
+  def a_current_price?
     # NOTE: this is a hack until we figure out how to deal with prices
-    binding.pry
     return true
     latest_pay_grade_version.invoice_item_pay_grades.first.present?
   end
 
   def dump_csv
-    CSV.open(@csv_file_name, "wb", headers: :first_row) do |csv|
+    CSV.open(@csv_file_name, 'wb', headers: :first_row) do |csv|
       csv << @csv_headers
       @csv_data.each { |line| csv << line }
     end
@@ -244,22 +165,50 @@ class MyServiceCodeAnalyzer
   end
 
   def show_summary
-    invoice_item_mappings = Hash.new(0)
-    provider_mappings = Hash.new(0)
-
-    Dispatching::ServiceCode.find_each do |sc|
-      invoice_item_mappings[sc.invoice_item_service_codes.count] += 1
-      provider_mappings[providers.count] += 1
-    end
+    invoice_item_mappings = count_invoice_item_mappings
+    provider_mappings = count_provider_mappings
 
     provider_mappings.each do |map_count, occurances|
-      puts "%6s service codes have %i provider mappings\n" % [number_with_delimiter(occurances), map_count]
+      printf("%6s service codes have %i provider mappings\n",
+             number_with_delimiter(occurances),
+             map_count)
     end
+
     puts "\n"
     invoice_item_mappings.each do |map_count, occurances|
-      puts "%6s service codes have %i invoice item mappings\n" % [number_with_delimiter(occurances), map_count]
+      printf("%6s service codes have %i invoice item mappings\n",
+             number_with_delimiter(occurances),
+             map_count)
     end
     nil
+  end
+
+  def count_provider_mappings
+    mappings = {}
+    # provider_mappings = Hash.new(0)
+
+    mappings[0] = Dispatching::ServiceCode
+                  .joins('LEFT JOIN dispatching_service_provider_service_code_maps spsc' \
+                         '  ON dispatching_service_codes.id = spsc.service_code_id')
+                  .where('spsc.service_provider_id IS NULL').count
+
+    maps = Dispatching::ServiceProviderServiceCodeMap.group(:service_code_id).count(:service_provider_id)
+    map_counts = maps.each_with_object(Hash.new(0)) { |(_, count), totals| totals[count] += 1 }
+    mappings.merge!(map_counts)
+  end
+
+  def count_invoice_item_mappings
+    mappings = {}
+    # provider_mappings = Hash.new(0)
+
+    mappings[0] = Dispatching::ServiceCode.joins(
+      'LEFT JOIN payroll_invoice_item_service_codes iisc' \
+      '  ON dispatching_service_codes.id = iisc.service_code_id'
+    ).where('iisc.invoice_item_id IS NULL').count
+
+    maps = Payroll::InvoiceItemServiceCode.group(:service_code_id).count(:invoice_item_id)
+    map_counts = maps.each_with_object(Hash.new(0)) { |(_, count), totals| totals[count] += 1 }
+    mappings.merge!(map_counts)
   end
 
   def toggle_debugging
@@ -280,14 +229,115 @@ class MyServiceCodeAnalyzer
 
   attr_reader :debugging
 
+  def all_service_codes
+    Dispatching::ServiceCode
+  end
+
+  def set_start(start_id, collection)
+    start = collection.find_each
+    return start if start_id.nil?
+
+    begin
+      id_to_seq_num(start_id, collection).times { start.next }
+    rescue StopIteration
+      warn '? starting record is beyond the end of the collection'
+      return nil
+    end
+    start
+  end
+
+  def id_to_seq_num(start_id, collection)
+    seq_num = 0
+    collection.find_each.with_index { |p, i| seq_num = i + 1 if p.id == start_id }
+    raise "? Starting part, #{start_id}, not found!!" if seq_num.zero?
+    seq_num - 1
+  end
+
+  #++
+  # Reporting methods for analyze_next
+  #
+  def check_for_naming(report)
+    report.add(:short_name, current_scode.short_name)
+    report.add(:description, current_scode.description)
+    report.add(:abbreviated, abbreviated?)
+  end
+
+  def check_for_on_boarding(report)
+    report.add(:properly_on_boarded, on_boarded?)
+  end
+
+  def check_for_valid_providers(report)
+    if providers.blank?
+      report.error('No service provider mapping')
+    else
+      report.warning("Has #{providers.count} providers (#{providers_list})") if providers.count > 1
+      report.add_all(:providers, providers) do |spm|
+        "#{spm.service_provider.id}: #{spm.service_provider.name}"
+      end
+    end
+  end
+
+  def check_for_possible_pay_grade_types(report)
+    if possible_pay_grades.present?
+      report.add_all(:possible_pay_grades, possible_pay_grades)
+    elsif providers.present?
+      report.error('Valid provider, but no pay grades')
+    else
+      report.error('No pay grades found')
+    end
+  end
+
+  def check_for_type_name(report)
+    report.add(:type, type.name) if type.present?
+  end
+
+  def check_for_invoice_item_mappings(report)
+    # report all mapped items
+    report.add_all(:mapped_invoice_items, mapped_invoice_items) do |i|
+      "#{i.invoice_item.id}: #{i.invoice_item.description} [#{i.invoice_item.invoice_item_type.name}]"
+    end
+
+    # At least one should have the same name as the short code
+    unless at_least_one_invoice_item_with_matching_name?
+      report.error("No mapped inv item named #{current_scode.short_name}")
+    end
+
+    report_extra_invoice_item_parts_with_non_matching_names(report)
+    report_extra_invoice_items(report)
+  end
+
+  def type_checks_fail?(report)
+    if type.blank?
+      report.error('(invalid--missing)')
+      return true
+    end
+
+    unless type_valid?
+      report.error("Invalid Type: #{type.name}")
+      return true
+    end
+    false
+  end
+
+  def invoice_item_mapping_checks_fail?(report)
+    # SC must be mapped to at least one invoice item
+    if mapped_invoice_items.blank?
+      report.add(:mapped_invoice_items, '')
+      report.error('not mapped to any invoice items')
+      return true
+    end
+    false
+  end
+
   def report_extra_invoice_items(report)
     # NOTE: this is a hack: if we have more than one valid invoice_item mapped, display a warning
     # It works because our current definition of "valid ii" is that one mapping
     # exists with the same name as the ii.  This flags any others we see.
     invoice_item_map.each do |ii2sc_map|
       ii = ii2sc_map.invoice_item
-      if ii.description != current_name
-        report.warning "-- Maps to multiple invoice items '#{current_name}' => #{ii.description}"
+      if ii.description != current_scode.short_name
+        report.warning "-- Maps to multiple invoice items '#{current_scode.short_name}' " \
+          "=> #{ii.description}"
       end
     end
     nil
@@ -295,69 +345,61 @@ class MyServiceCodeAnalyzer
 
   def report_extra_invoice_item_parts_with_non_matching_names(report)
     # NOTE: this is a hack: if we have more than one valid part mapped, display a warning
-    # It works because our current definition of "valid ii" is that one mapping exists with the same name as the ii.  This flags any others we see.
-    invoice_item_map.each do |map|
-      ii = map.invoice_item
-      ii.invoice_item_parts.each do |map|
-        if map.part.number != ii.description
-          report.warning "-- Has a map to an invoice item w/ multiple parts: #{ii.description} => #{map.part.number}"
+    # It works because our current definition of "valid ii" is that one mapping
+    # exists with the same name as the ii.  This flags any others we see.
+    invoice_item_map.each do |ii_map|
+      ii = ii_map.invoice_item
+      ii.invoice_item_parts.each do |iip_map|
+        if iip_map.part.number != ii.description
+          report.warning "-- Map to inv item w/ multiple parts: #{ii.description} => #{iip_map.part.number}"
         end
       end
     end
     nil
   end
-
-  def clear_memos
-    @provider = nil
-    @service_code = nil
-    @existing_types = nil
-  end
+  #
+  #--
 
   def check(test)
     retval = eval(test)
-    $stderr.puts "%% '#{test}' failed" unless retval if debugging
+    if debugging
+      warn "%% '#{test}' failed" unless retval
+    end
     retval
   end
 end
 
-def test_it(test_id: 3139)
-  # id 3139, "SAM1866-KIT" is a known good ServiceCode, fully on-board and priced
-  seq_num = 0
-  Dispatching::ServiceCode.all.each_with_index { |sc, i| seq_num = i if sc.id == test_id }
-  $stderr.puts "? Test SC, #{test_id}, not found!!  Using first one in table." if seq_num.zero?
+def test_it(test_id: 3081)
+  # id 3139, "APL1037-KIT" is a known good ServiceCode, fully on-board and priced
+  @sa = MyServiceCodeAnalyzer.new(start_id: test_id)
+  @sa.toggle_debugging
 
-  @scc = MyServiceCodeAnalyzer.new(start: seq_num)
-  @scc.toggle_debugging
+  warn "% Testing w/SC #{@sa.current_scode.id} '#{@sa.current_scode.short_name}'"
+  warn "? Fail: no service code found (id=#{test_id})" if @sa.current_scode.nil?
+  warn '? Fail: no type found' if @sa.type.blank?
+  warn '? Fail: no valid_types' if @sa.valid_types.blank?
+  warn '? Fail: type_valid? wrong' unless @sa.type_valid?
+  warn '? Fail: no invoice_item_map' if @sa.invoice_item_map.blank?
+  warn '? Fail: no invoice_item' if @sa.invoice_item_map.blank?
+  warn '? Fail: no show_summary' unless @sa.respond_to?(:show_summary)
+  warn 'Showing @sa.summary:'
+  @sa.show_summary
+  warn "Is the test Service code on_boarded? #{@sa.on_boarded?}"
 
-  $stderr.puts "% Testing w/SC #{@scc.service_code.id} (seq: #{seq_num}) '#{@scc.service_code.short_name}'"
-  $stderr.puts "? Fail: no service code found (id=#{test_id})" if @scc.service_code.nil?
-  $stderr.puts "? Fail: no type found" unless @scc.type.present?
-  $stderr.puts "? Fail: no valid_types" unless @scc.valid_types.present?
-  $stderr.puts "? Fail: type_valid? wrong" unless @scc.type_valid?
-  $stderr.puts "? Fail: no existing_types" unless @scc.existing_types.present?
-  $stderr.puts "? Fail: existing types inconsistent" unless @scc.valid_types_consistent?
-  $stderr.puts "? Fail: no invoice_item_map" unless @scc.invoice_item_map.present?
-  $stderr.puts "? Fail: no invoice_item" unless @scc.invoice_item_map.present?
-  $stderr.puts "? Fail: no show_summary" unless @scc.respond_to?(:show_summary)
-  # $stderr.puts "Showing @scc.summary:"
-  # @scc.show_summary
-  $stderr.puts "Is the test Service code on_boarded? #{@scc.on_boarded?}"
+  @sa.toggle_debugging
 
-  $stderr.puts "? Fail: no show_stats" unless @scc.respond_to?(:show_stats)
-  @scc.toggle_debugging
-
-  $stderr.puts "-- Test complete"
+  warn '-- Test complete'
 end
 
 def set_it_up
   outfile = 'sc-audit/sc_analysis.csv'
-  @scc = MyServiceCodeAnalyzer.new(output: outfile)
-  @scc.show_summary
+  @sa = MyServiceCodeAnalyzer.new(output: outfile)
+  @sa.show_summary
   puts "\nAnalyzing. . ."
-  @scc.analyze_all
-  puts "@scc.dump_csv  to create the .CSV output file, #{outfile}"
+  @sa.analyze_all
+  puts "@sa.dump_csv  to create the .CSV output file, #{outfile}"
 end
-puts 'defined: test_it(test_id: <existing_service_code_id>)   # default: 3139'
+puts 'defined: test_it(test_id: <existing_service_code_id>)   # default: 3081'
 puts 'defined: set_it_up - summarize and analyze current service codes.  One step before CSV output.'
 
 # Service Code is on-boarded:
