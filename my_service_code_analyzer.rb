@@ -85,12 +85,8 @@ class MyServiceCodeAnalyzer
     providers.map { |spm| "#{spm.service_provider.id}: #{spm.service_provider.name}" }.join(',')
   end
 
-  def valid_types
-    %w[general payroll].sort
-  end
-
   def type_valid?
-    valid_types.include?(type.name)
+    %w[general payroll].include?(type.name)
   end
 
   def invoice_item_map
@@ -377,7 +373,6 @@ def test_it(test_id: 3081)
   warn "% Testing w/SC #{@sa.current_scode.id} '#{@sa.current_scode.short_name}'"
   warn "? Fail: no service code found (id=#{test_id})" if @sa.current_scode.nil?
   warn '? Fail: no type found' if @sa.type.blank?
-  warn '? Fail: no valid_types' if @sa.valid_types.blank?
   warn '? Fail: type_valid? wrong' unless @sa.type_valid?
   warn '? Fail: no invoice_item_map' if @sa.invoice_item_map.blank?
   warn '? Fail: no invoice_item' if @sa.invoice_item_map.blank?
